@@ -11,15 +11,10 @@ class Notifier:
     def __init__(self, config: NotificationConfig):
         self.config = config
         self._log_file = Path(config.log_file)
-        self._setup_file_logging()
+        self._ensure_log_dir()
 
-    def _setup_file_logging(self) -> None:
+    def _ensure_log_dir(self) -> None:
         self._log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(self._log_file, encoding="utf-8")
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
-        logging.getLogger().addHandler(file_handler)
 
     def notify(self, title: str, message: str, sound: bool = True) -> None:
         logger.info(f"[NOTIFICATION] {title}: {message}")

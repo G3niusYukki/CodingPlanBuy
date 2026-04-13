@@ -1,14 +1,29 @@
-import json
 import logging
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright_stealth import Stealth
 
 from core.config import BrowserConfig
+
+_stealth = Stealth(
+    navigator_languages_override=("zh-CN", "zh"),
+    navigator_platform_override="Win32",
+)
 
 logger = logging.getLogger(__name__)
 
 AUTH_DIR = Path(__file__).resolve().parent.parent / "auth"
+
+__all__ = ["BrowserManager", "AUTH_DIR"]
+
+LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-infobars",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
 
 
 class BrowserManager:
@@ -19,10 +34,21 @@ class BrowserManager:
 
     async def launch(self) -> Browser:
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.config.headless,
-            slow_mo=self.config.slow_mo,
-        )
+
+        launch_kwargs = {
+            "headless": self.config.headless,
+            "slow_mo": self.config.slow_mo,
+            "args": LAUNCH_ARGS,
+        }
+        if self.config.proxy:
+            launch_kwargs["proxy"] = {"server": self.config.proxy}
+            # Log proxy host without credentials
+            from urllib.parse import urlparse
+            parsed = urlparse(self.config.proxy)
+            safe = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}" if parsed.hostname else self.config.proxy
+            logger.info(f"Using proxy: {safe}")
+
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         return self._browser
 
     async def create_context(
@@ -42,52 +68,10 @@ class BrowserManager:
             viewport=self.config.viewport,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
         )
 
-        # Apply stealth patches
-        await self._apply_stealth(context)
+        await _stealth.apply_stealth_async(context)
         return context
-
-    async def _apply_stealth(self, context: BrowserContext) -> None:
-        """Apply stealth patches to avoid detection."""
-        stealth_js = """
-        // Override webdriver property
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-        
-        // Override plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-        
-        // Override languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['zh-CN', 'zh', 'en-US', 'en']
-        });
-        
-        // Override permissions
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-                Promise.resolve({ state: Notification.permission }) :
-                originalQuery(parameters)
-        );
-        
-        // Chrome runtime
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-        """
-        await context.add_init_script(stealth_js)
 
     @staticmethod
     async def save_state(context: BrowserContext, path: Path) -> None:

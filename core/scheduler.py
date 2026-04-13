@@ -16,6 +16,11 @@ class PurchaseScheduler:
         self.config = config
         self.tz = ZoneInfo(config.scheduler.timezone)
         self._scheduler = AsyncIOScheduler(timezone=self.tz)
+        self._notifier = None
+
+    def set_notifier(self, notifier) -> None:
+        """Set notifier for error notifications from scheduler."""
+        self._notifier = notifier
 
     def _parse_purchase_time(self, time_str: str) -> tuple[int, int, int]:
         parts = time_str.split(":")
@@ -40,26 +45,46 @@ class PurchaseScheduler:
         h, m, s = self._parse_purchase_time(time_str)
         warm_sec = pre_warm_seconds or self.config.scheduler.pre_warm_seconds
 
+        # Compute warm time: schedule the job early so pre_warm runs in advance
+        warm_dt = datetime.now(self.tz).replace(hour=h, minute=m, second=s, microsecond=0) - timedelta(seconds=warm_sec)
+        warm_h, warm_m, warm_s = warm_dt.hour, warm_dt.minute, warm_dt.second
+
         async def wrapped():
             target = datetime.now(self.tz).replace(hour=h, minute=m, second=s, microsecond=0)
-            warm_target = target - timedelta(seconds=warm_sec)
-            logger.info(f"[{platform_name}] Pre-warming at {warm_target.strftime('%H:%M:%S')}")
-            
-            # Pre-warm: launch browser and navigate
-            context = await coro_func(pre_warm=True)
-            
-            logger.info(f"[{platform_name}] Aligning to target time {target.strftime('%H:%M:%S')}")
-            await self.align_to_target(target)
-            
-            logger.info(f"[{platform_name}] Triggering purchase at {datetime.now(self.tz).strftime('%H:%M:%S.%f')}")
-            result = await coro_func(pre_warm=False, context=context)
-            
-            logger.info(f"[{platform_name}] Purchase result: {result}")
+            logger.info(f"[{platform_name}] Pre-warming (scheduled early by {warm_sec}s)")
 
-        trigger = CronTrigger(hour=h, minute=m, second=s, timezone=self.tz)
+            try:
+                # Pre-warm: launch browser and navigate
+                context = await coro_func(pre_warm=True)
+
+                logger.info(f"[{platform_name}] Aligning to target time {target.strftime('%H:%M:%S')}")
+                await self.align_to_target(target)
+
+                logger.info(f"[{platform_name}] Triggering purchase at {datetime.now(self.tz).strftime('%H:%M:%S.%f')}")
+                result = await coro_func(pre_warm=False, context=context)
+
+                logger.info(f"[{platform_name}] Purchase result: {result}")
+            except Exception as e:
+                logger.exception(f"[{platform_name}] Scheduler job failed: {e}")
+                if self._notifier:
+                    self._notifier.failure(platform_name, f"Scheduler error: {e}")
+
+        trigger = CronTrigger(hour=warm_h, minute=warm_m, second=warm_s, timezone=self.tz)
         job_id = f"{platform_name}_purchase"
         self._scheduler.add_job(wrapped, trigger, id=job_id, name=f"{platform_name} purchase")
         logger.info(f"Scheduled {platform_name} at {time_str} ({self.config.scheduler.timezone})")
+
+    async def run_immediate(self, coro_func) -> None:
+        """Run a purchase job immediately without scheduling (for --now mode)."""
+        logger.info("Running immediate purchase (no scheduling)")
+        try:
+            context = await coro_func(pre_warm=True)
+            result = await coro_func(pre_warm=False, context=context)
+            logger.info(f"Immediate purchase result: {result}")
+        except Exception as e:
+            logger.exception(f"Immediate purchase failed: {e}")
+            if self._notifier:
+                self._notifier.failure("immediate", f"Error: {e}")
 
     def start(self) -> None:
         logger.info("Scheduler started")
