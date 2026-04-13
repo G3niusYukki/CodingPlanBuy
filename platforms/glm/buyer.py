@@ -69,12 +69,13 @@ class GLMBuyer(BaseBuyer):
     async def check_login(self, page: Page) -> bool:
         await page.goto(self.purchase_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle", timeout=15000)
-        # GLM might redirect to login or show login modal
         if "login" in page.url.lower():
             return False
-        # Check for login/avatar element that indicates authenticated state
-        login_indicator = await page.query_selector(".user-avatar, .login-avatar, [class*=avatar], [class*=user]")
-        return login_indicator is not None or "login" not in page.url.lower()
+        # Check for avatar element indicating authenticated state
+        login_indicator = await page.query_selector(
+            ".user-avatar, .login-avatar, [class*=avatar], [class*=user]"
+        )
+        return login_indicator is not None
 
     async def is_available(self, page: Page) -> bool:
         for selector in self.SOLD_OUT_SELECTORS:
@@ -169,10 +170,11 @@ class GLMBuyer(BaseBuyer):
                     logger.info("Clicked confirmation button")
                     break
 
-            # Wait for success
+            # Wait for page transition after confirmation
             await page.wait_for_load_state("networkidle", timeout=15000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
+            # Check for immediate success
             for sel in self.SUCCESS_SELECTORS:
                 element = await page.query_selector(sel)
                 if element:
@@ -183,14 +185,13 @@ class GLMBuyer(BaseBuyer):
                         message=f"Successfully purchased {tier} tier",
                     )
 
-            # Check URL for order confirmation
-            current_url = page.url
-            if any(kw in current_url.lower() for kw in ("order", "success", "pay")):
-                return PurchaseResult(
-                    status=PurchaseStatus.SUCCESS,
-                    platform=self.platform_name,
-                    tier=tier,
-                    message=f"Purchased {tier}, redirected to: {current_url}",
+            # If redirected to payment page, wait for manual payment
+            current_url = page.url.lower()
+            if any(kw in current_url for kw in ("pay", "order", "cashier")):
+                return await self._wait_for_payment(
+                    page,
+                    timeout=self.config.payment_timeout,
+                    success_indicators=self.SUCCESS_SELECTORS,
                 )
 
             # Purchase flow might have failed for this tier, try next

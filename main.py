@@ -48,15 +48,16 @@ def cli(ctx, config_path):
 
 
 @cli.command()
+@click.option("--now", "run_now", is_flag=True, help="Run immediately without scheduling")
 @click.pass_context
-def run(ctx):
+def run(ctx, run_now):
     """Run the purchase automation at scheduled times."""
     config = ctx.obj["config"]
     setup_logging(config)
-    asyncio.run(_run_scheduler(config))
+    asyncio.run(_run_scheduler(config, run_now=run_now))
 
 
-async def _run_scheduler(config: AppConfig):
+async def _run_scheduler(config: AppConfig, run_now: bool = False):
     from core.browser import BrowserManager
     from core.notifier import Notifier
     from core.scheduler import PurchaseScheduler
@@ -71,8 +72,11 @@ async def _run_scheduler(config: AppConfig):
     await browser_manager.launch()
 
     scheduler = PurchaseScheduler(config)
+    scheduler.set_notifier(notifier)
 
     try:
+        buyers = {}
+
         if config.platforms.aliyun.enabled:
             aliyun_config = config.platforms.aliyun
             buyer = AliyunBuyer(
@@ -81,6 +85,7 @@ async def _run_scheduler(config: AppConfig):
                 notifier=notifier,
                 retry_config=RetryConfig(max_retries=aliyun_config.max_retries),
             )
+            buyers["aliyun"] = (buyer, aliyun_config)
 
             async def aliyun_job(pre_warm=False, context=None):
                 if pre_warm:
@@ -97,6 +102,7 @@ async def _run_scheduler(config: AppConfig):
                 notifier=notifier,
                 retry_config=RetryConfig(max_retries=glm_config.max_retries),
             )
+            buyers["glm"] = (buyer, glm_config)
 
             async def glm_job(pre_warm=False, context=None):
                 if pre_warm:
@@ -105,13 +111,27 @@ async def _run_scheduler(config: AppConfig):
 
             scheduler.schedule_platform("glm", glm_config.purchase_time, glm_job)
 
-        scheduler.start()
-        console.print("[green]Scheduler running. Press Ctrl+C to stop.[/green]")
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            pass
+        if run_now:
+            # --now mode: run all enabled platforms immediately
+            for platform_name, (buyer, plat_config) in buyers.items():
+                console.print(f"[cyan]Running {platform_name} purchase immediately...[/cyan]")
+
+                async def make_job(b):
+                    async def job(pre_warm=False, context=None):
+                        if pre_warm:
+                            return await b.pre_warm()
+                        return await b.run(context=context)
+                    return job
+
+                await scheduler.run_immediate(await make_job(buyer))
+        else:
+            scheduler.start()
+            console.print("[green]Scheduler running. Press Ctrl+C to stop.[/green]")
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
     finally:
         scheduler.stop()
         await browser_manager.close()

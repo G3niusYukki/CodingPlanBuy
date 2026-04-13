@@ -30,6 +30,7 @@ class RetryResult:
     success: bool
     attempts: int
     last_error: Exception | None = None
+    value: Any = None
 
 
 def classify_error(error: Exception) -> ErrorCategory:
@@ -52,8 +53,8 @@ async def retry_async(
 
     for attempt in range(1, cfg.max_retries + 1):
         try:
-            await func(**kwargs)
-            return RetryResult(success=True, attempts=attempt)
+            value = await func(**kwargs)
+            return RetryResult(success=True, attempts=attempt, value=value)
         except Exception as e:
             last_error = e
             category = classify_error(e)

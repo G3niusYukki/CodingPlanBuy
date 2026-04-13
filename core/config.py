@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import yaml
@@ -14,6 +13,7 @@ class BrowserConfig(BaseModel):
     slow_mo: int = Field(default=50, ge=0, le=1000)
     viewport_width: int = Field(default=1920, ge=800)
     viewport_height: int = Field(default=1080, ge=600)
+    proxy: str | None = None
 
     @property
     def viewport(self) -> dict:
@@ -26,6 +26,7 @@ class AliyunConfig(BaseModel):
     url: str = "https://common-buy.aliyun.com/coding-plan"
     max_retries: int = Field(default=5, ge=1, le=20)
     retry_delay_seconds: float = Field(default=1.0, ge=0.1, le=10.0)
+    payment_timeout: int = Field(default=120, ge=30, le=600)
 
     @field_validator("purchase_time")
     @classmethod
@@ -45,6 +46,7 @@ class GLMConfig(BaseModel):
     url: str = "https://www.bigmodel.cn/glm-coding"
     max_retries: int = Field(default=5, ge=1, le=20)
     retry_delay_seconds: float = Field(default=1.0, ge=0.1, le=10.0)
+    payment_timeout: int = Field(default=120, ge=30, le=600)
     priority: list[str] = Field(default=["Pro", "Lite", "Max"])
 
     @field_validator("purchase_time")

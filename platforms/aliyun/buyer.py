@@ -18,7 +18,6 @@ class AliyunBuyer(BaseBuyer):
 
     # Selectors - may need updating if the page changes
     SELECTORS = {
-        "login_redirect": "login.aliyun.com",
         "purchase_button": [
             'button:has-text("立即购买")',
             'button:has-text("马上抢购")',
@@ -121,26 +120,27 @@ class AliyunBuyer(BaseBuyer):
                 logger.info(f"Clicked confirm button: {selector}")
                 break
 
-        # Wait for success indicators
+        # Wait for page transition after confirmation
         await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(1)
 
+        # Check for immediate success (no payment needed)
         for selector in self.SELECTORS["success_indicator"]:
             element = await page.query_selector(selector)
             if element:
                 return PurchaseResult(
                     status=PurchaseStatus.SUCCESS,
                     platform=self.platform_name,
-                    message="Purchase completed successfully",
+                    message="Purchase completed successfully (no payment needed)",
                 )
 
-        # If no explicit success indicator, check URL for order confirmation
-        await asyncio.sleep(2)
-        current_url = page.url
-        if "order" in current_url.lower() or "success" in current_url.lower() or "pay" in current_url.lower():
-            return PurchaseResult(
-                status=PurchaseStatus.SUCCESS,
-                platform=self.platform_name,
-                message=f"Redirected to: {current_url}",
+        # If redirected to payment page, wait for manual payment
+        current_url = page.url.lower()
+        if any(kw in current_url for kw in ("pay", "order", "cashier")):
+            return await self._wait_for_payment(
+                page,
+                timeout=self.config.payment_timeout,
+                success_indicators=self.SELECTORS["success_indicator"],
             )
 
         return PurchaseResult(
