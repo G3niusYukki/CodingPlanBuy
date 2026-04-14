@@ -8,9 +8,26 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class TerminalError(Exception):
+    """Error that should not be retried — e.g. wrong selectors, auth failure."""
+    pass
+
+
 class ErrorCategory(Enum):
     RETRYABLE = "retryable"
     TERMINAL = "terminal"
+
+
+TERMINAL_PATTERNS = [
+    # English
+    "sold out", "unavailable", "auth expired", "forbidden", "captcha",
+    "session expired", "not logged in",
+    # Chinese
+    "已售罄", "售罄", "已售完", "暂不可购买", "暂无库存",
+    "登录过期", "未登录", "验证码",
+    # Selector failures (deterministic — retrying won't help)
+    "not found or disabled",
+]
 
 
 @dataclass
@@ -34,10 +51,12 @@ class RetryResult:
 
 
 def classify_error(error: Exception) -> ErrorCategory:
+    # TerminalError is always terminal
+    if isinstance(error, TerminalError):
+        return ErrorCategory.TERMINAL
     error_msg = str(error).lower()
-    terminal_patterns = ["sold out", "unavailable", "auth expired", "forbidden", "captcha"]
-    for pattern in terminal_patterns:
-        if pattern in error_msg:
+    for pattern in TERMINAL_PATTERNS:
+        if pattern.lower() in error_msg:
             return ErrorCategory.TERMINAL
     return ErrorCategory.RETRYABLE
 
@@ -55,13 +74,18 @@ async def retry_async(
         try:
             value = await func(**kwargs)
             return RetryResult(success=True, attempts=attempt, value=value)
+        except TerminalError as e:
+            logger.error(f"[Attempt {attempt}] Terminal error: {e}")
+            return RetryResult(success=False, attempts=attempt, last_error=e)
         except Exception as e:
             last_error = e
-            category = classify_error(e)
 
-            if category == ErrorCategory.TERMINAL:
-                logger.error(f"[Attempt {attempt}] Terminal error: {e}")
-                return RetryResult(success=False, attempts=attempt, last_error=e)
+            # Non-retryable exception type? Skip retry.
+            if not isinstance(e, cfg.retryable_exceptions):
+                category = classify_error(e)
+                if category == ErrorCategory.TERMINAL:
+                    logger.error(f"[Attempt {attempt}] Terminal error: {e}")
+                    return RetryResult(success=False, attempts=attempt, last_error=e)
 
             if attempt >= cfg.max_retries:
                 logger.error(f"[Attempt {attempt}/{cfg.max_retries}] Max retries exceeded: {e}")

@@ -24,11 +24,16 @@ class AliyunBuyer(BaseBuyer):
 
     # Subscription page: actual purchase button
     SUBSCRIBE_SELECTORS = [
+        'a:has-text("订阅")',
         'button:has-text("订阅")',
         'button:has-text("立即订阅")',
         'button:has-text("立即购买")',
+        'a:has-text("立即订阅")',
+        'a:has-text("立即购买")',
         '#J_buy_btn',
         '.buy-btn',
+        '[data-spm="buy"]',
+        '.commodity-buy',
     ]
 
     SOLD_OUT_SELECTORS = [
@@ -47,6 +52,8 @@ class AliyunBuyer(BaseBuyer):
     CONFIRM_SELECTORS = [
         'button:has-text("确认")',
         'button:has-text("提交订单")',
+        'a:has-text("确认")',
+        'a:has-text("提交订单")',
     ]
 
     def __init__(
@@ -62,7 +69,10 @@ class AliyunBuyer(BaseBuyer):
 
     async def check_login(self, page: Page) -> bool:
         await page.goto(self.purchase_url, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         if "login" in page.url.lower():
             return False
         return True
@@ -92,7 +102,12 @@ class AliyunBuyer(BaseBuyer):
         # Step 1: Navigate to landing page
         if self.purchase_url not in page.url:
             await page.goto(self.purchase_url, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+
+        await self._debug_capture(page, "01_landing")
 
         # Step 2: Click "马上抢购" entry button (may open new tab)
         pages_before = set(context.pages)
@@ -107,10 +122,12 @@ class AliyunBuyer(BaseBuyer):
                 break
 
         if not clicked_entry:
+            await self._debug_capture(page, "02_no_entry_button")
             return PurchaseResult(
                 status=PurchaseStatus.ERROR,
                 platform=self.platform_name,
                 message="Could not find entry button (马上抢购)",
+                retryable=False,
             )
 
         # Step 3: Detect new tab or same-page navigation
@@ -124,12 +141,27 @@ class AliyunBuyer(BaseBuyer):
             logger.info(f"New tab opened, switched to: {page.url}")
         else:
             logger.info(f"Same-page navigation, URL: {page.url}")
+            # Wait for potential SPA navigation
+            try:
+                await page.wait_for_url("**/common-buy.aliyun.com/**", timeout=5000)
+                logger.info(f"[aliyun] Same-page navigated to: {page.url}")
+            except Exception:
+                # URL didn't change — subscribe form may be below the fold
+                logger.info("[aliyun] URL unchanged, scrolling to find subscribe form")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
 
+        # Wait for the subscription page to render (JS-heavy page)
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception:
             logger.warning("[aliyun] domcontentloaded timeout, proceeding anyway")
+
+        # Extra wait for JS-rendered content
+        await asyncio.sleep(2)
         logger.info(f"Subscription page loaded: {page.url}")
+
+        await self._debug_capture(page, "03_subscribe_page")
 
         # Step 4: Check sold out BEFORE clicking subscribe
         for selector in self.SOLD_OUT_SELECTORS:
@@ -142,11 +174,14 @@ class AliyunBuyer(BaseBuyer):
                     message="Product sold out",
                 )
 
-        # Step 5: Click "订阅" button (only buttons, not nav links)
+        # Step 5: Click subscribe button — use wait_for_selector for JS-rendered content
         clicked_subscribe = False
         for selector in self.SUBSCRIBE_SELECTORS:
-            element = await page.query_selector(selector)
-            if element and await element.is_visible():
+            try:
+                element = await page.wait_for_selector(selector, state="visible", timeout=3000)
+            except Exception:
+                continue
+            if element:
                 is_disabled = await element.get_attribute("disabled")
                 if is_disabled:
                     logger.warning(f"[aliyun] Subscribe button disabled: {selector}")
@@ -157,10 +192,12 @@ class AliyunBuyer(BaseBuyer):
                 break
 
         if not clicked_subscribe:
+            await self._debug_capture(page, "04_no_subscribe_button")
             return PurchaseResult(
                 status=PurchaseStatus.SOLD_OUT,
                 platform=self.platform_name,
                 message="Subscribe button not found or disabled",
+                retryable=False,
             )
 
         # Wait for page transition
@@ -170,19 +207,26 @@ class AliyunBuyer(BaseBuyer):
             pass
         await asyncio.sleep(0.5)
 
+        await self._debug_capture(page, "05_after_subscribe")
+
         # Step 6: Check for confirmation dialog
         for selector in self.CONFIRM_SELECTORS:
-            element = await page.query_selector(selector)
-            if element and await element.is_visible():
-                await element.click()
-                logger.info(f"Clicked confirm button: {selector}")
-                break
+            try:
+                element = await page.wait_for_selector(selector, state="visible", timeout=3000)
+                if element:
+                    await element.click()
+                    logger.info(f"Clicked confirm button: {selector}")
+                    break
+            except Exception:
+                continue
 
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception:
             pass
         await asyncio.sleep(0.5)
+
+        await self._debug_capture(page, "06_after_confirm")
 
         # Step 7: Check for immediate success
         for selector in self.SUCCESS_SELECTORS:
@@ -203,6 +247,7 @@ class AliyunBuyer(BaseBuyer):
                 success_indicators=self.SUCCESS_SELECTORS,
             )
 
+        await self._debug_capture(page, "07_un unclear_status")
         return PurchaseResult(
             status=PurchaseStatus.ERROR,
             platform=self.platform_name,

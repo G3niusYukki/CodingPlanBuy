@@ -14,6 +14,7 @@ class BrowserConfig(BaseModel):
     viewport_width: int = Field(default=1920, ge=800)
     viewport_height: int = Field(default=1080, ge=600)
     proxy: str | None = None
+    debug: bool = False
 
     @property
     def viewport(self) -> dict:

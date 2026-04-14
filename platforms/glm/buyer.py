@@ -32,12 +32,25 @@ class GLMBuyer(BaseBuyer):
     }
 
     PURCHASE_BUTTON_SELECTORS = [
+        # Tag + text combinations
         'button:has-text("立即购买")',
         'button:has-text("立即订阅")',
         'button:has-text("马上抢购")',
         'a:has-text("立即购买")',
+        'a:has-text("立即订阅")',
+        'a:has-text("马上抢购")',
+        # Generic text match (may match elements with nested spans)
+        ':text("立即购买")',
+        ':text("立即订阅")',
+        ':text("马上抢购")',
+        # Class-based
         ".purchase-btn",
         ".subscribe-btn",
+        ".buy-btn",
+        ".order-btn",
+        # Data-attribute based
+        '[data-action="buy"]',
+        '[data-action="subscribe"]',
     ]
 
     SOLD_OUT_SELECTORS = [
@@ -67,11 +80,23 @@ class GLMBuyer(BaseBuyer):
         self.priority = config.priority
 
     async def check_login(self, page: Page) -> bool:
-        await page.goto(self.purchase_url, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        # First visit the login domain to ensure session cookies are loaded
+        await page.goto("https://open.bigmodel.cn/usercenter", wait_until="domcontentloaded")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         if "login" in page.url.lower():
             return False
-        # If page didn't redirect to login, consider authenticated
+
+        # Now navigate to the purchase domain — cookies carry over via same BrowserContext
+        await page.goto(self.purchase_url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        if "login" in page.url.lower():
+            return False
         return True
 
     async def is_available(self, page: Page) -> bool:
@@ -89,8 +114,11 @@ class GLMBuyer(BaseBuyer):
 
         for selector_key in ("tab", "card"):
             selector = tier_data[selector_key]
-            element = await page.query_selector(selector)
-            if element and await element.is_visible():
+            try:
+                element = await page.wait_for_selector(selector, state="visible", timeout=5000)
+            except Exception:
+                continue
+            if element:
                 await element.click()
                 logger.info(f"Selected {tier} tier via {selector_key} selector")
                 await asyncio.sleep(0.5)
@@ -118,7 +146,12 @@ class GLMBuyer(BaseBuyer):
     async def execute_purchase(self, page: Page) -> PurchaseResult:
         if self.purchase_url not in page.url:
             await page.goto(self.purchase_url, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+
+        await self._debug_capture(page, "01_glm_landing")
 
         # Try tiers in priority order
         for tier in self.priority:
@@ -136,39 +169,72 @@ class GLMBuyer(BaseBuyer):
                 logger.info(f"[GLM] Tier {tier} is sold out, trying next")
                 continue
 
-            # Click purchase button
+            await self._debug_capture(page, f"02_tier_{tier}_selected")
+
+            # Click purchase button — first try page-wide, then within tier card
             clicked = False
+
             for selector in self.PURCHASE_BUTTON_SELECTORS:
-                element = await page.query_selector(selector)
-                if element and await element.is_visible():
+                try:
+                    element = await page.wait_for_selector(selector, state="visible", timeout=3000)
+                except Exception:
+                    continue
+                if element:
                     await element.click()
                     clicked = True
                     logger.info(f"Clicked purchase button for {tier}: {selector}")
                     break
 
+            # If page-wide search failed, try within tier card
+            if not clicked:
+                tier_data = self.TIER_SELECTORS.get(tier)
+                if tier_data and tier_data.get("card"):
+                    card = await page.query_selector(tier_data["card"])
+                    if card:
+                        for selector in self.PURCHASE_BUTTON_SELECTORS:
+                            element = await card.query_selector(selector)
+                            if element and await element.is_visible():
+                                await element.click()
+                                clicked = True
+                                logger.info(f"Clicked purchase button for {tier} (in card): {selector}")
+                                break
+
             if not clicked:
                 logger.warning(f"[GLM] No purchase button found for tier {tier}")
+                await self._debug_capture(page, f"03_no_button_{tier}")
                 continue
 
             # Wait for page transition
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
             await asyncio.sleep(1)
+
+            await self._debug_capture(page, f"04_after_click_{tier}")
 
             # Check for confirmation dialog
             confirm_selectors = [
                 'button:has-text("确认")',
                 'button:has-text("确定")',
                 'button:has-text("提交订单")',
+                'a:has-text("确认")',
             ]
             for sel in confirm_selectors:
-                element = await page.query_selector(sel)
-                if element and await element.is_visible():
-                    await element.click()
-                    logger.info("Clicked confirmation button")
-                    break
+                try:
+                    element = await page.wait_for_selector(sel, state="visible", timeout=3000)
+                    if element:
+                        await element.click()
+                        logger.info("Clicked confirmation button")
+                        break
+                except Exception:
+                    continue
 
             # Wait for page transition after confirmation
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
             await asyncio.sleep(1)
 
             # Check for immediate success
@@ -193,10 +259,14 @@ class GLMBuyer(BaseBuyer):
 
             # Purchase flow might have failed for this tier, try next
             logger.info(f"[GLM] Tier {tier} purchase unclear, trying next tier")
+            await self._debug_capture(page, f"05_unclear_{tier}")
             # Navigate back if needed
             if self.purchase_url not in page.url:
                 await page.goto(self.purchase_url, wait_until="domcontentloaded")
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
 
         return PurchaseResult(
             status=PurchaseStatus.SOLD_OUT,

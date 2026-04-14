@@ -10,7 +10,7 @@ from playwright.async_api import BrowserContext, Page
 
 from core.browser import BrowserManager
 from core.notifier import Notifier
-from core.retry import RetryConfig, retry_async
+from core.retry import RetryConfig, TerminalError, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class PurchaseResult:
     tier: str = ""
     message: str = ""
     error: Exception | None = None
+    retryable: bool = True
 
 
 class BaseBuyer(ABC):
@@ -118,7 +119,10 @@ class BaseBuyer(ABC):
     async def _purchase_with_retry(self) -> PurchaseResult:
         result = await self.execute_purchase(self._page)
         if result.status != PurchaseStatus.SUCCESS:
-            raise RuntimeError(result.message or f"Purchase failed: {result.status.value}")
+            msg = result.message or f"Purchase failed: {result.status.value}"
+            if not result.retryable:
+                raise TerminalError(msg)
+            raise RuntimeError(msg)
         return result
 
     def _auth_path(self) -> Path:
@@ -191,3 +195,32 @@ class BaseBuyer(ABC):
             path = logs_dir / f"{self.platform_name}_{name}_{timestamp}.png"
             await self._page.screenshot(path=str(path))
             logger.info(f"Screenshot saved: {path}")
+
+    async def _debug_capture(self, page: Page, step_name: str) -> None:
+        """Take screenshot and dump HTML for debugging. Only active in debug mode."""
+        if not self.browser_manager.config.debug:
+            return
+
+        debug_dir = Path("logs") / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Screenshot (full page)
+        ss_path = debug_dir / f"{self.platform_name}_{step_name}_{ts}.png"
+        try:
+            await page.screenshot(path=str(ss_path), full_page=True)
+            logger.debug(f"[DEBUG] Screenshot: {ss_path}")
+        except Exception as e:
+            logger.debug(f"[DEBUG] Screenshot failed: {e}")
+
+        # HTML dump
+        html_path = debug_dir / f"{self.platform_name}_{step_name}_{ts}.html"
+        try:
+            html_content = await page.content()
+            html_path.write_text(html_content, encoding="utf-8")
+            logger.debug(f"[DEBUG] HTML dump: {html_path}")
+        except Exception as e:
+            logger.debug(f"[DEBUG] HTML dump failed: {e}")
+
+        logger.debug(f"[DEBUG] URL: {page.url}")

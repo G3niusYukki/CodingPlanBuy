@@ -49,11 +49,16 @@ def cli(ctx, config_path):
 
 @cli.command()
 @click.option("--now", "run_now", is_flag=True, help="Run immediately without scheduling")
+@click.option("--debug", "debug_mode", is_flag=True, help="Enable debug mode: screenshots + HTML dumps")
 @click.pass_context
-def run(ctx, run_now):
+def run(ctx, run_now, debug_mode):
     """Run the purchase automation at scheduled times."""
     config = ctx.obj["config"]
+    if debug_mode:
+        config.browser.debug = True
     setup_logging(config)
+    if debug_mode:
+        logging.getLogger().setLevel(logging.DEBUG)
     asyncio.run(_run_scheduler(config, run_now=run_now))
 
 
